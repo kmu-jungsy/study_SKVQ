@@ -1,3 +1,5 @@
+## This is forked from [SKVQ](https://github.com/cat538/SKVQ) for study myself.
+
 # SKVQ
 
 This is the official implementation of [SKVQ](https://www.arxiv.org/abs/2405.06219).
