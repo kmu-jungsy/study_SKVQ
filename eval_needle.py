@@ -26,6 +26,12 @@ from experiments.modeling_llama_skvq import LlamaForCausalLM
 from experiments.utils import plug_quantizer_into_model, rouge1, rougeL
 from calib_config import *
 
+from modeling_llamagear import LlamaForCausalLM_GEARKIVI
+from modeling_llama_kivi import LlamaForCausalLM_KIVI
+from transformers import LlamaConfig, AutoTokenizer, LlamaForCausalLM
+from transformers import BitsAndBytesConfig
+from datasets import load_dataset
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--model_name", required=True)
 parser.add_argument("--quant", type=str, default=None)
@@ -221,22 +227,11 @@ class LLMNeedleHaystackTester:
 
         self.model_name = model_name
 
-        if fake_quantizer:
-            fake_quantizer.active(True)
         #     use_flash_attn = False
         # else:
         #     use_flash_attn = True
         self.enc = AutoTokenizer.from_pretrained(model_path, use_fast=False, trust_remote_code=True)
-        if test_model is not None:
-            self.model_to_test = test_model
-        else:
-            self.model_to_test = LlamaForCausalLM.from_pretrained(
-                model_path,
-                device_map="auto",
-                torch_dtype=torch.float16,
-                use_flash_attention_2=True,
-            )
-        plug_quantizer_into_model(self.model_to_test, fake_quantizer)
+        self.model_to_test = test_model
         self.fake_quantizer = fake_quantizer
         # self.enc, self.model_to_test, self.quantizer_handle = load_model_and_plug_quantizer(
         #     model_path, fake_quantizer=fake_quantizer, parallisim="tp", use_flash_attn=use_flash_attn)
@@ -299,6 +294,7 @@ class LLMNeedleHaystackTester:
         if self.save_results:
             if self.result_exists(context_length, depth_percent):
                 return
+
 
         # Go generate the required length context and place your needle statement in
         context = self.generate_context(context_length, depth_percent)
@@ -406,7 +402,6 @@ class LLMNeedleHaystackTester:
 
     def generate_context(self, context_length, depth_percent):
         # Load up tiktoken so we navigate tokens more easily
-
         # Get your Paul Graham files loaded into a string
         context = self.read_context_files()
 
@@ -628,20 +623,53 @@ def get_quantizer_from_str(
 
 
 def main(args):
-    scheme = args.quant
-    model_name = args.model_name
+    model_name = "llama2-7b"
 
-    model_path: str = MODEL_NAME_TO_PATH[model_name]
+    model_path: str = "meta-llama/Llama-2-7b-hf"
 
-    model = LlamaForCausalLM.from_pretrained(
-        model_path,
-        device_map="auto",
+    config = LlamaConfig.from_pretrained("meta-llama/Llama-2-7b-hf")
+
+    config.k_bits = 2# current support 2/4 bit for KV Cache
+    config.v_bits = 2 # current support 2/4 bit for KV Cache
+    config.group_size = 64
+    config.residual_length = 64 # the number of recent fp16 tokens
+
+    compress_config = {}
+    compress_config["compress_method"] = "gearlKIVI" # "gearlKIVI" "gearsKIVI"
+    compress_config["group_size"] = 64
+    compress_config["residual"] = 64
+    compress_config["quantize_bit"] = 2
+    compress_config["rank"] = 2 ## prefill rank
+    compress_config["rankv"] = 2 ## prefill rank
+    compress_config["loop"] = 3
+    # compress_config["stream_list"] = stream_list
+    stream_list = [torch.cuda.Stream(),torch.cuda.Stream()]
+
+    model = LlamaForCausalLM_GEARKIVI.from_pretrained(
+        "meta-llama/Llama-2-7b-hf",
+        config = config,
+        # quantization_config = quantization_config,
+        compress_config = compress_config,
         torch_dtype=torch.float16,
-        use_flash_attention_2=True,
+        device_map = "cuda:1"
     )
 
-    if args.quant is not None:
-        fake_quantizer = get_quantizer_from_str(args.quant, model, model_name)
+    # model = LlamaForCausalLM_KIVI.from_pretrained(
+    #     "meta-llama/Llama-2-7b-hf",
+    #     config = config,
+    #     # quantization_config = quantization_config,
+    #     # compress_config = compress_config,
+    #     torch_dtype=torch.float16,
+    #     device_map = "cuda:0"
+    # )
+
+    # model = LlamaForCausalLM.from_pretrained(
+    #     "meta-llama/Llama-2-7b-hf",
+    #     torch_dtype=torch.float16,
+    #     device_map = "cuda:0")
+
+    model = model.half()
+
 
     context_lengths_max = args.ctx_len
     if context_lengths_max > 16000:
@@ -649,12 +677,12 @@ def main(args):
     else:
         context_lengths_num_intervals = 15
 
-    save_tag = fake_quantizer.tag() if fake_quantizer else "None"
+    save_tag = "None"
 
     ht = LLMNeedleHaystackTester(
-        model_name=f"{model_name}-{scheme}",
+        model_name=model_name,
         model_path=model_path,
-        fake_quantizer=fake_quantizer,
+        fake_quantizer = None,
         test_model=model,
         context_lengths_min=1000,
         context_lengths_max=context_lengths_max,
